@@ -32,6 +32,7 @@
 
 -include_lib("mero/include/mero.hrl").
 
+-behavior(mero_pool).
 
 %%% Start/stop functions
 -export([connect/3,
@@ -70,7 +71,9 @@ controlling_process(Client, Pid) ->
         ok ->
             ok;
         {error, Reason} ->
-            ?LOG_EVENT(Client#client.event_callback, [socket, controlling_process, error, {reason, Reason}]),
+            ?LOG_EVENT(
+                Client#client.event_callback,
+                [socket, controlling_process, error, {reason, Reason}]),
             {error, Reason}
     end.
 
@@ -170,8 +173,6 @@ transaction(Client, async_mget, [Keys]) ->
     case async_mget(Client, Keys) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, ok} ->
             {Client, ok}
     end;
@@ -180,38 +181,21 @@ transaction(Client, async_delete, [Keys]) ->
     case async_delete(Client, Keys) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, ok} ->
             {Client, ok}
     end;
 
 transaction(Client, async_increment, [Keys]) ->
-    case async_increment(Client, Keys) of
-        {error, Reason} ->
-            {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
-        {ok, ok} ->
-            {Client, ok}
-    end;
+    async_increment(Client, Keys);
 
 transaction(Client, async_blank_response, [Keys, Timeout]) ->
-    case async_blank_response(Client, Keys, Timeout) of
-        {error, Reason} ->
-            {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
-        {ok, Results} ->
-            {Client, Results}
-    end;
+    {ok, Results} = async_blank_response(Client, Keys, Timeout),
+    {Client, Results};
 
 transaction(Client, async_mget_response, [Keys, Timeout]) ->
     case async_mget_response(Client, Keys, Timeout) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, {ok, FoundItems}} ->
              FoundKeys = [Key || #mero_item{key = Key} <- FoundItems],
              NotFoundKeys = lists:subtract(Keys, FoundKeys),
@@ -296,7 +280,8 @@ receive_response(Client, Op, TimeLimit, AccBinary, AccResult) ->
                 {ok, NBuffer, NAccResult} ->
                     receive_response(Client, Op, TimeLimit, NBuffer, NAccResult);
                 {error, Reason} ->
-                    ?LOG_EVENT(Client#client.event_callback, [socket, rcv, error, {reason, Reason}]),
+                    ?LOG_EVENT(
+                        Client#client.event_callback, [socket, rcv, error, {reason, Reason}]),
                     throw({failed, Reason})
             end;
         {error, Reason} ->
@@ -316,8 +301,10 @@ parse_reply(Buffer, AccResult) ->
                 {ok, {value, Key, Bytes, CAS}} ->
                     case split_command(BinaryRest) of
                         {[Value], BinaryRest2} when (size(Value) == Bytes) ->
-                            parse_reply(BinaryRest2, [#mero_item{key = Key, value = Value, cas = CAS}
-                                                      | AccResult]);
+                            parse_reply(
+                                BinaryRest2,
+                                [#mero_item{key = Key, value = Value, cas = CAS} | AccResult]
+                            );
                         {error, uncomplete} ->
                             {ok, Buffer, AccResult}
                     end;

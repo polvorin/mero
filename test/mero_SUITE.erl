@@ -33,7 +33,32 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
 
--compile(export_all).
+-export([
+    all/0,
+    groups/0,
+    init_per_group/2,
+    end_per_group/2,
+    init_per_testcase/2,
+    end_per_testcase/2,
+    add/1,
+    delete/1,
+    get_undefineds/1,
+    increase_counter/1,
+    increase_counter_clustered_key/1,
+    increment/1,
+    mdelete/1,
+    multiget_defineds/1,
+    multiget_defineds_clustered_keys/1,
+    multiget_undefineds/1,
+    set/1,
+    undefined_counter/1,
+    cas/1,
+    mincrease_counter/1,
+    cas/1,
+    madd/1,
+    mset/1,
+    mcas/1
+]).
 
 -define(HOST, "127.0.0.1").
 -define(PORT, 11911).
@@ -89,9 +114,6 @@ groups() ->
      }
     ].
 
-suite() ->
-    [{timetrap, {seconds, 15}}].
-
 init_per_group(text_protocol, Config) ->
     ClusterConfig = [{cluster,
                       [{servers, [{"localhost", 11298}, {"localhost", 11299}]},
@@ -122,14 +144,6 @@ init_per_group(binary_protocol, Config) ->
     [{cluster_config, ClusterConfig} | Config].
 
 end_per_group(_GroupName, _Config) ->
-    ok.
-
-init_per_suite(Conf) ->
-    ok = application:start(inets),
-    Conf.
-
-end_per_suite(_Conf) ->
-    ok = application:stop(inets),
     ok.
 
 init_per_testcase(_Module, Conf) ->
@@ -315,8 +329,10 @@ multiget_defineds(_Conf) ->
                 {<<"16">>, <<"3">>},
                 {<<"12">>, <<"1">>},
                 {<<"11">>, <<"1">>}],
-    ?assertEqual(Expected, mero:mget(cluster,
-                                     [<<"11">>,<<"12">>,<<"13">>,<<"14">>,<<"15">>,<<"16">>,<<"17">>], 1000)).
+    ?assertEqual(
+        Expected,
+        mero:mget(cluster, [<<"11">>,<<"12">>,<<"13">>,<<"14">>,<<"15">>,<<"16">>,<<"17">>], 1000)
+    ).
 
 multiget_defineds_clustered_keys(_Conf) ->
     ?assertMatch({ok, 1}, mero:increment_counter(cluster, {<<"1">>, <<"11">>})),
@@ -441,15 +457,15 @@ mcas(_) ->
     KVCs = mero:mgets(cluster, Keys, 5000),
     FailingKeys = [hd(Keys), lists:nth(length(Keys), Keys)],
     {NUpdates, Expected} =
-        lists:unzip([case lists:member(Key, FailingKeys) of
-                         true ->
-                             {{Key, <<"should not update">>, 10000, CAS + 1}, {error, already_exists}};
-                         false ->
-                             {{Key, <<Key/binary, Key/binary>>, 10000, CAS}, ok}
-                     end
-                     || {Key, _, CAS} <- KVCs]),
-    ?assertEqual(Expected,
-                 mero:mcas(cluster, NUpdates, 5000)).
+        lists:unzip([
+            case lists:member(Key, FailingKeys) of
+                true ->
+                    {{Key, <<"should not update">>, 10000, CAS + 1}, {error, already_exists}};
+                false ->
+                    {{Key, <<Key/binary, Key/binary>>, 10000, CAS}, ok}
+            end || {Key, _, CAS} <- KVCs]
+        ),
+    ?assertEqual(Expected, mero:mcas(cluster, NUpdates, 5000)).
 
 
 %%%=============================================================================

@@ -32,6 +32,7 @@
 
 -include_lib("mero/include/mero.hrl").
 
+-behavior(mero_pool).
 
 %%% Start/stop functions
 -export([connect/3,
@@ -40,10 +41,11 @@
          close/2]).
 
 
--record(client, {socket, pool, event_callback :: module()}).
+-record(client, {socket, pool, event_callback :: {module(), atom(), [term()]}}).
 
 -define(SOCKET_OPTIONS, [binary,
                          {packet, raw},
+                         {recbuf, 1024 * 32},
                          {active, false},
                          {reuseaddr, true},
                          {nodelay, true}]).
@@ -70,7 +72,9 @@ controlling_process(Client, Pid) ->
         ok ->
             ok;
         {error, Reason} ->
-            ?LOG_EVENT(Client#client.event_callback, [socket, controlling_process, error, {reason, Reason}]),
+            ?LOG_EVENT(
+                Client#client.event_callback,
+                [socket, controlling_process, error, {reason, Reason}]),
             {error, Reason}
     end.
 
@@ -146,8 +150,6 @@ transaction(Client, async_mset, [KVECs]) ->
     case async_mset(Client, KVECs) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, ok} ->
             {Client, ok}
     end;
@@ -156,8 +158,6 @@ transaction(Client, async_madd, [KVECs]) ->
     case async_madd(Client, KVECs) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, ok} ->
             {Client, ok}
     end;
@@ -166,8 +166,6 @@ transaction(Client, async_mget, [Keys]) ->
     case async_mget(Client, Keys) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, ok} ->
             {Client, ok}
     end;
@@ -176,8 +174,6 @@ transaction(Client, async_increment, [Keys]) ->
     case async_increment(Client, Keys) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, ok} ->
             {Client, ok}
     end;
@@ -186,8 +182,6 @@ transaction(Client, async_delete, [Keys]) ->
     case async_delete(Client, Keys) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, ok} ->
             {Client, ok}
     end;
@@ -196,28 +190,18 @@ transaction(Client, async_mget_response, [Keys, Timeout]) ->
     case async_mget_response(Client, Keys, Timeout) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, Results} ->
             {Client, Results}
     end;
 
 transaction(Client, async_blank_response, [Keys, Timeout]) ->
-    case async_blank_response(Client, Keys, Timeout) of
-        {error, Reason} ->
-            {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
-        {ok, Results} ->
-            {Client, Results}
-    end;
+    {ok, Results} = async_blank_response(Client, Keys, Timeout),
+    {Client, Results};
 
 transaction(Client, async_mset_response, [Items, Timeout]) ->
     case async_mset_response(Client, Items, Timeout) of
         {error, Reason} ->
             {error, Reason};
-        {ok, {error, Reason}} ->
-            {Client, {error, Reason}};
         {ok, Results} ->
             {Client, Results}
     end.
@@ -236,7 +220,7 @@ send_receive(Client, {Op, _Args} = Cmd, TimeLimit) ->
     try
         Data = pack(Cmd),
         ok = send(Client, Data),
-        {ok, receive_response(Client, Op, TimeLimit)}
+        {ok, receive_response(Client, Op, <<>>, TimeLimit)}
     catch
         throw:{failed, Reason} ->
             {error, Reason}
@@ -332,15 +316,13 @@ send(Client, Data) ->
 
 cas_value(16#00) ->
     undefined;
-cas_value(undefined) ->
-    16#00;
 cas_value(Value) when is_integer(Value) andalso Value > 0 ->
     Value.
 
 
-receive_response(Client, Op, TimeLimit) ->
-    case recv_bytes(Client, 24, TimeLimit) of
-        <<
+receive_response(Client, Op, Buffer, TimeLimit) ->
+    case recv_bytes(Client, 24, Buffer, TimeLimit) of
+        {<<
           16#81:8,      % magic (0)
           Op:8,         % opcode (1)
           KeySize:16,   % key length (2,3)
@@ -350,9 +332,9 @@ receive_response(Client, Op, TimeLimit) ->
           BodySize:32,  % total body (8-11)
           _Opq:32,      % opaque (12-15)
           CAS:64        % CAS (16-23)
-        >> ->
-            case recv_bytes(Client, BodySize, TimeLimit) of
-                <<_Extras:ExtrasSize/binary, Key:KeySize/binary, Value/binary>> ->
+        >>, Rest} ->
+            case recv_bytes(Client, BodySize, Rest, TimeLimit) of
+                {<<_Extras:ExtrasSize/binary, Key:KeySize/binary, Value/binary>>, <<>>} ->
                     case response_status(StatusCode) of
                         ok ->
                             #mero_item{key = Key, value = Value, cas = cas_value(CAS)};
@@ -368,18 +350,23 @@ receive_response(Client, Op, TimeLimit) ->
             throw({failed, {unexpected_header, Data, {expected, Op}}})
     end.
 
-
-recv_bytes(_Client, 0, _TimeLimit) ->
-    <<>>;
-recv_bytes(Client, NumBytes, TimeLimit) ->
-    Timeout = mero_conf:millis_to(TimeLimit),
-    case gen_tcp_recv(Client#client.socket, NumBytes, Timeout) of
-        {ok, Bin} ->
-            Bin;
-        {error, Reason} ->
-            ?LOG_EVENT(Client#client.event_callback, [memcached_receive_error, {reason, Reason}]),
-            throw({failed, {receive_bytes, Reason}})
+recv_bytes(Client, NumBytes, Buffer, TimeLimit) ->
+    case Buffer of
+        <<Data:NumBytes/binary, Rest/binary>> ->
+            {Data, Rest};
+        _ ->
+            Timeout = mero_conf:millis_to(TimeLimit),
+            case gen_tcp_recv(Client#client.socket, Timeout) of
+                {ok, Bin} ->
+                    recv_bytes(Client, NumBytes, <<Buffer/binary, Bin/binary>>, TimeLimit);
+                {error, Reason} ->
+                    ?LOG_EVENT(
+                        Client#client.event_callback, [memcached_receive_error, {reason, Reason}]),
+                    throw({failed, {receive_bytes, Reason}})
+            end
     end.
+
+
 
 
 value_to_integer(Value) ->
@@ -390,8 +377,8 @@ to_integer(Binary) when is_binary(Binary) ->
     <<Value:Size/integer>> = Binary,
     Value.
 
-gen_tcp_recv(Socket, NumBytes, Timeout) ->
-    gen_tcp:recv(Socket, NumBytes, Timeout).
+gen_tcp_recv(Socket, Timeout) ->
+    gen_tcp:recv(Socket, 0, Timeout).
 
 
 async_mset(Client, NKVECs) ->
@@ -427,10 +414,13 @@ async_delete(Client, Keys) ->
     end.
 
 async_increment(Client, Keys) ->
-    try
-        {ok, lists:foreach(fun({K, Value, Initial, ExpTime}) ->
-                                   send(Client, pack({?MEMCACHE_INCREMENTQ, {K, Value, Initial, ExpTime}}))
-                           end, Keys)}
+    try {
+            ok,
+            lists:foreach(
+                fun({K, Value, Initial, ExpTime}) ->
+                    send(Client, pack({?MEMCACHE_INCREMENTQ, {K, Value, Initial, ExpTime}}))
+                end, Keys)
+        }
     catch
         throw:{failed, Reason} ->
             {error, Reason}
@@ -463,15 +453,15 @@ async_blank_response(_Client, _Keys, _TimeLimit) ->
 
 async_mget_response(Client, Keys, TimeLimit) ->
     try
-        {ok, receive_mget_response(Client, TimeLimit, Keys, [])}
+        {ok, receive_mget_response(Client, TimeLimit, Keys, <<>>, [])}
     catch
         throw:{failed, Reason} ->
             {error, Reason}
     end.
 
-receive_mget_response(Client, TimeLimit, Keys, Acc) ->
-    case recv_bytes(Client, 24, TimeLimit) of
-        <<
+receive_mget_response(Client, TimeLimit, Keys, Buffer, Acc) ->
+    case recv_bytes(Client, 24, Buffer, TimeLimit) of
+        {<<
           16#81:8,      % magic (0)
           Op:8,         % opcode (1)
           KeySize:16,   % key length (2,3)
@@ -481,9 +471,12 @@ receive_mget_response(Client, TimeLimit, Keys, Acc) ->
           BodySize:32,  % total body (8-11)
           _Opq:32,      % opaque (12-15)
           CAS:64        % CAS (16-23)
-        >> = Data ->
-            case recv_bytes(Client, BodySize, TimeLimit) of
-                <<_Extras:ExtrasSize/binary, Key:KeySize/binary, ValueReceived/binary>> ->
+        >>, BufferRest} = Data ->
+            case recv_bytes(Client, BodySize, BufferRest, TimeLimit) of
+                {
+                    <<_Extras:ExtrasSize/binary, Key:KeySize/binary, ValueReceived/binary>>,
+                    BufferRest2
+                } ->
                     {Key, Value} = filter_by_status(Status, Op, Key, ValueReceived),
                     Responses = [#mero_item{key = Key, value = Value, cas = cas_value(CAS)}
                                  | Acc],
@@ -491,9 +484,9 @@ receive_mget_response(Client, TimeLimit, Keys, Acc) ->
                     case Op of
                         %% On silent we expect more values
                         ?MEMCACHE_GETKQ ->
-                            receive_mget_response(Client, TimeLimit, NKeys, Responses);
-                        %% This was the last one!
-                        ?MEMCACHE_GETK ->
+                            receive_mget_response(Client, TimeLimit, NKeys, BufferRest2, Responses);
+                        %% This was the last one!. Ensure there is no further data
+                        ?MEMCACHE_GETK when BufferRest2 == <<>> ->
                             Responses ++ [#mero_item{key = KeyIn} || KeyIn <- NKeys]
                     end;
                 Data ->
@@ -510,13 +503,13 @@ filter_by_status(Status, _Op, _Key, _ValueReceived) -> throw({failed, {response_
 
 async_mset_response(Client, NKVECs, TimeLimit) ->
     try
-        {ok, receive_mset_response(Client, TimeLimit, NKVECs, [])}
+        {ok, receive_mset_response(Client, TimeLimit, NKVECs, <<>>, [])}
     catch
         throw:{failed, Reason} ->
             {error, Reason}
     end.
 
-receive_mset_response(Client, TimeLimit, NKVECs, Acc) ->
+receive_mset_response(Client, TimeLimit, NKVECs, Buffer, Acc) ->
     %% when sending the original requests, we had numbered each with a 1-based index
     %% according to its position in the original unsharded list of items, using the opaque
     %% field (which we get back with each response).  we used quiet mode for all but the
@@ -529,8 +522,8 @@ receive_mset_response(Client, TimeLimit, NKVECs, Acc) ->
     %%
     %% where N was set as opaque data in the request associated with Key.
     %%
-    case recv_bytes(Client, 24, TimeLimit) of
-        <<
+    case recv_bytes(Client, 24, Buffer, TimeLimit) of
+        {<<
           16#81:8,      % magic (0)
           Op:8,         % opcode (1)
           KeySize:16,   % key length (2,3)
@@ -540,9 +533,9 @@ receive_mset_response(Client, TimeLimit, NKVECs, Acc) ->
           BodySize:32,     % total body (8-11)
           Index:32,     % opaque (12-15)
           _CAS:64       % CAS (16-23)
-        >> ->
-            case recv_bytes(Client, BodySize, TimeLimit) of
-                <<_Extras:ExtrasSize/binary, _Key:KeySize/binary, _ValueReceived/binary>> ->
+        >>, Rest} ->
+            case recv_bytes(Client, BodySize, Rest, TimeLimit) of
+                {<<_Extras:ExtrasSize/binary, _Key:KeySize/binary, _Value/binary>>, Rest2} ->
                     %% the response to set/add/replace should have no extras, no key, and
                     %% no value, but may have a body if an error occurred.
                     NAcc = [{Index, response_status(StatusCode)} | Acc],
@@ -552,10 +545,10 @@ receive_mset_response(Client, TimeLimit, NKVECs, Acc) ->
                                 Op == ?MEMCACHE_ADDQ ->
                             %% we are receiving a response for a 'quiet' command, meaning the
                             %% associated request failed.
-                            receive_mset_response(Client, TimeLimit, NItems, NAcc);
+                            receive_mset_response(Client, TimeLimit, NItems, Rest2, NAcc);
 
-                        Op when Op == ?MEMCACHE_SET;
-                                Op == ?MEMCACHE_ADD ->
+                        Op when Rest2 == <<>>, Op == ?MEMCACHE_SET;
+                                Rest2 == <<>>, Op == ?MEMCACHE_ADD ->
                             %% last response.  any other request which had no response was
                             %% successful.
                             NAcc ++ [{element(1, Item), ok}

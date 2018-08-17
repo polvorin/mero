@@ -33,7 +33,20 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--compile(export_all).
+-export([
+    all/0,
+    init_per_testcase/2,
+    end_per_testcase/2,
+    start_stop/1,
+    start_stop_many/1,
+    checkout_checkin/1,
+    checkout_checkin_limits/1,
+    checkout_checkin_closed/1,
+    conn_failed_checkout_error/1,
+    checkout_and_die/1,
+    expire_connections/1,
+    checkout_timeout/1
+]).
 
 -define(POOL, 'mero_cluster_localhost_0_0').
 -define(PORT, 11999).
@@ -47,34 +60,20 @@
     ]).
 
 all() -> [
-             start_stop,
-             start_stop_many,
-             checkout_checkin,
-             checkout_checkin_limits,
-             checkout_checkin_closed,
-             conn_failed_checkout_error,
-             checkout_and_die,
-             expire_connections,
-             checkout_timeout
+    start_stop,
+    start_stop_many,
+    checkout_checkin,
+    checkout_checkin_limits,
+    checkout_checkin_closed,
+    conn_failed_checkout_error,
+    checkout_and_die,
+    expire_connections,
+    checkout_timeout
 ].
-
-
-suite() -> [{timetrap, {seconds, 5}}].
-
-
-init_per_suite(Conf) ->
-  ok = application:start(inets),
-  Conf.
-
-end_per_suite(_Conf) ->
-  ok = application:stop(inets),
-  ok.
-
 
 init_per_testcase(_, Conf) ->
   application:load(mero),
   Conf.
-
 
 end_per_testcase(_, _Conf) ->
   application:stop(mero).
@@ -86,7 +85,7 @@ end_per_testcase(_, _Conf) ->
 %% Just tests if the application can be started and when it does that
 %% the mero_cluster module is generated correctly.
 start_stop(_Conf) ->
-  mero_test_util:start_server(?CLUSTER_CONFIG,  5, 30, 1000, 5000),
+  mero_test_util:start_server(?CLUSTER_CONFIG, 5, 30, 1000, 5000),
   ct:log("~p~n", [mero_cluster:child_definitions()]),
   ?assertMatch(
       [{cluster,
@@ -210,8 +209,7 @@ checkout_checkin(_) ->
   mero_test_util:wait_for_pool_state(?POOL, 1, 1, 0, 0),
 
   ct:log("Another process is allowed to checkout a new connection"),
-  ?assertMatch({ok, _Conn2},
-    proc:exec(proc:new(), {mero_pool, checkout, [?POOL, ?TIMELIMIT(1000)]})).
+  ?assertMatch({ok, _}, proc:exec(proc:new(), {mero_pool, checkout, [?POOL, ?TIMELIMIT(1000)]})).
 
 
 %% A little more complex than the previous. Tests that new connections are created
@@ -303,9 +301,9 @@ checkout_timeout(_) ->
     ct:log("A process timesout"),
     {error, pool_timeout} = proc:exec(P1, {mero_pool, checkout, [?POOL, ?TIMELIMIT(0)]}),
     mero_test_util:wait_for_pool_state(?POOL, 2, 2, 0, 0),
-    ?assertMatch({ok, _Conn}, mero_pool:checkout(?POOL, ?TIMELIMIT(3))),
+    ?assertMatch({ok, _}, mero_pool:checkout(?POOL, ?TIMELIMIT(3))),
     mero_test_util:wait_for_pool_state(?POOL, 1, 2, 0, 0),
-    ?assertMatch({ok, _Conn}, mero_pool:checkout(?POOL, ?TIMELIMIT(1000))),
+    ?assertMatch({ok, _}, mero_pool:checkout(?POOL, ?TIMELIMIT(1000))),
     mero_test_util:wait_for_pool_state(?POOL, 0, 2, 0, 0).
 
 
