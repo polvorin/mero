@@ -207,7 +207,6 @@ cas_value(Value) when is_integer(Value) andalso Value > 0 ->
 receive_udp_response(Socket, Id, Timeout) ->
     case gen_udp:recv(Socket, 0, Timeout) of
         {ok, {_, _, <<Id:16, Seq:16, D:16, 0:16, Data/binary>>}} ->
-            io:format("Initial response: id:~p seq:~p ~p \n", [Id, Seq, D]),
             receive_udp_response(Socket, Id, Timeout ,D, gb_trees:enter(Seq, Data, gb_trees:empty()));
         {error, Reason} ->
             throw({failed, {receive_bytes, Reason}});
@@ -216,7 +215,6 @@ receive_udp_response(Socket, Id, Timeout) ->
     end.
 
 receive_udp_response(Socket, Id, Timeout, NumberOfDatagrams, Datagrams) ->
-    io:format("Expected: ~p ReceivedSoFar: ~p (~p)\n", [NumberOfDatagrams, gb_trees:size(Datagrams), gb_trees:keys(Datagrams)]),
     case gb_trees:size(Datagrams) of
         NumberOfDatagrams ->
             iolist_to_binary(gb_trees:values(Datagrams));
