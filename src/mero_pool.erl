@@ -193,6 +193,7 @@ init(Parent, ClusterName, Host, Port, PoolName, WrkModule) ->
                        pool = PoolName,
                        callback_info = CallBackInfo,
                        worker_module = WrkModule},
+            send_interval(30000, reload_conf),
             pool_loop(schedule_expiration(State), Parent, Deb)
     end.
 
@@ -230,8 +231,15 @@ state(PoolName) ->
 %%% Internal functions
 %%%=============================================================================
 
+reload_conf(State) ->
+    State#pool_st{min_connections = mero_conf:min_free_connections_per_pool(),
+                  max_connections = mero_conf:max_connections_per_pool()}.
+
+
 pool_loop(State, Parent, Deb) ->
     receive
+        reload_conf ->
+            ?MODULE:pool_loop(reload_conf(State), Parent, Deb);
         {connect_success, Conn} ->
             ?MODULE:pool_loop(connect_success(State, Conn), Parent, Deb);
         connect_failed ->
@@ -327,7 +335,7 @@ maybe_spawn_connect(#pool_st{
 calculate_needed(FreeSockets, Connected, Connecting, MaxConn, MinConn) ->
     TotalSockets = Connected + Connecting,
     MaxAllowed = MaxConn - TotalSockets,
-    IdleSockets = FreeSockets + Connecting,
+    IdleSockets = FreeSockets + Connecting, 
     case MinConn - IdleSockets of
         MaxNeeded when MaxNeeded > MaxAllowed ->
             MaxAllowed;
